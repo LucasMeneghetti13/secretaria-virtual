@@ -1739,6 +1739,8 @@ const server = http.createServer(async (req, res) => {
       'METHOD:PUBLISH',
       'X-WR-CALNAME:Claudete',
       'X-WR-TIMEZONE:America/Sao_Paulo',
+      'X-PUBLISHED-TTL:PT1H',
+      'REFRESH-INTERVAL;VALUE=DURATION:PT1H',
       'BEGIN:VTIMEZONE',
       'TZID:America/Sao_Paulo',
       'BEGIN:STANDARD',
@@ -1754,11 +1756,11 @@ const server = http.createServer(async (req, res) => {
       const uid = e.id + '@claudete.secretaria';
       let dtstart, dtend;
       if (e.diaTodo || !e.hora) {
-        dtstart = 'DATE:' + toICS(e.data);
+        dtstart = 'VALUE=DATE:' + toICS(e.data);
         // Dia todo — fim é o dia seguinte
         const d = new Date(e.data + 'T12:00:00');
         d.setDate(d.getDate() + 1);
-        dtend = 'DATE:' + d.toISOString().split('T')[0].replace(/-/g,'');
+        dtend = 'VALUE=DATE:' + d.toISOString().split('T')[0].replace(/-/g,'');
       } else {
         dtstart = toICSDateTime(e.data, e.hora);
         // Duração padrão de 1 hora
@@ -1770,13 +1772,8 @@ const server = http.createServer(async (req, res) => {
       ics.push('BEGIN:VEVENT');
       ics.push('UID:' + uid);
       ics.push('DTSTAMP:' + stamp);
-      if (e.diaTodo || !e.hora) {
-        ics.push('DTSTART;' + dtstart);
-        ics.push('DTEND;' + dtend);
-      } else {
-        ics.push('DTSTART;' + dtstart);
-        ics.push('DTEND;' + dtend);
-      }
+      ics.push('DTSTART;' + dtstart);
+      ics.push('DTEND;' + dtend);
       ics.push('SUMMARY:' + (e.titulo || '').replace(/,/g,'\\,').replace(/;/g,'\\;'));
       if (e.desc || e.descricao) ics.push('DESCRIPTION:' + (e.desc||e.descricao||'').replace(/\n/g,'\\n'));
       if (e.link) ics.push('URL:' + e.link);
