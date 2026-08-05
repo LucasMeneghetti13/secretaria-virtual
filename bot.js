@@ -1,13 +1,24 @@
 const http = require("http");
 const https = require("https");
 
+// ── PROTEÇÃO CONTRA CRASH ──
+// Sem isso, um erro isolado (rede, API externa) em qualquer callback assíncrono
+// (setInterval de lembretes/briefings, polling, etc.) derruba o processo inteiro
+// e silencia lembretes/briefings até o Render reiniciar o serviço.
+process.on("unhandledRejection", (err) => {
+  console.error("❌ unhandledRejection:", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("❌ uncaughtException:", err);
+});
+
 // ── CONFIG ──
 const TELEGRAM_TOKEN  = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_KEY   = process.env.ANTHROPIC_KEY;
 const CHAT_ID         = "8703109963";
 const PORT            = process.env.PORT || 3000;
 const SUPABASE_URL    = "https://oyiuehtobjeaorlctvhe.supabase.co";
-const SUPABASE_KEY    = process.env.SUPABASE_KEY || "sb_secret_OGGGvn5HEWa7_WA7ONWUNQ_YnIhZ4U1";
+const SUPABASE_KEY    = process.env.SUPABASE_KEY;
 
 // ── SUPABASE HELPERS ──
 function sbRequest(method, table, body, query) {
@@ -628,9 +639,14 @@ async function executeAction(jsonStr) {
 
     case "criar_lembrete": {
       const dataHora = new Date(action.data_hora);
+      if (isNaN(dataHora.getTime())) {
+        console.error("❌ criar_lembrete: data_hora inválida:", action.data_hora);
+        return `Não consegui entender a data/hora do lembrete ("${action.data_hora}"). Pode me dizer o dia e a hora de novo?`;
+      }
       const id = Date.now();
       const lembrete = { id, texto: action.texto, dataHora: dataHora.getTime(), enviado: false };
       state.lembretes.push(lembrete);
+      console.log(`⏰ Lembrete criado: "${action.texto}" para ${dataHora.toISOString()} (id ${id})`);
       await sbInsert("lembretes", {
         id, texto: action.texto,
         data_hora: dataHora.toISOString(), enviado: false
@@ -645,9 +661,15 @@ async function executeAction(jsonStr) {
       for (let i = 0; i < action.lembretes.length; i++) {
         const l = action.lembretes[i];
         const dataHora = new Date(l.data_hora);
+        if (isNaN(dataHora.getTime())) {
+          console.error("❌ criar_lembretes: data_hora inválida:", l.data_hora);
+          criados.push(`• ${l.texto} — não entendi a data/hora, pule este`);
+          continue;
+        }
         const id = Date.now() + i * 10;
         const lembrete = { id, texto: l.texto, dataHora: dataHora.getTime(), enviado: false };
         state.lembretes.push(lembrete);
+        console.log(`⏰ Lembrete criado: "${l.texto}" para ${dataHora.toISOString()} (id ${id})`);
         await sbInsert("lembretes", { id, texto: l.texto, data_hora: dataHora.toISOString(), enviado: false });
         const dtFmt = dataHora.toLocaleString("pt-BR", { timeZone:"America/Sao_Paulo", day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit" });
         criados.push(`• ${l.texto} — ${dtFmt}`);
