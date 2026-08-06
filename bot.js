@@ -775,7 +775,11 @@ Escreva APENAS o corpo do e-mail, sem saudação de abertura com nome (já será
 
     case "verificar_emails": {
       await sendTelegram("📧 Verificando sua caixa de entrada...");
-      await buscarEmailsNovos();
+      try {
+        await buscarEmailsNovos();
+      } catch(e) {
+        return `❌ Não consegui acessar seu e-mail agora (${e.message}). Verifique se a senha em EMAIL_PASS no Render está correta.`;
+      }
       const info = _emailsInformativos.length;
       if (info > 0) {
         let msg = `📬 <b>${info} e-mail(s) informativo(s):</b>\n`;
@@ -1179,15 +1183,19 @@ function imapConnect() {
     socket.on("error", reject);
 
     function sendCmd(cmd) {
-      return new Promise((res) => {
+      return new Promise((res, rej) => {
         tagCount++;
         const tag = "A" + String(tagCount).padStart(3,"0");
         const full = tag + " " + cmd + "\r\n";
         buffer = "";
         onData = (buf) => {
-          if (buf.includes(tag + " OK") || buf.includes(tag + " NO") || buf.includes(tag + " BAD")) {
+          if (buf.includes(tag + " OK")) {
             onData = null;
             res(buf);
+          } else if (buf.includes(tag + " NO") || buf.includes(tag + " BAD")) {
+            onData = null;
+            const linha = buf.trim().split("\r\n").filter(Boolean).pop();
+            rej(new Error(`IMAP "${cmd.split(" ")[0]}" falhou: ${linha}`));
           }
         };
         socket.write(full);
@@ -1331,6 +1339,7 @@ async function buscarEmailsNovos() {
     setTimeout(() => socket.destroy(), 500);
   } catch(e) {
     console.error("❌ IMAP error:", e.message);
+    throw e;
   }
 }
 
@@ -2071,8 +2080,8 @@ server.listen(PORT, () => {
   setInterval(loadFromSupabase, 300000); // re-sync every 5min
   // Verifica e-mails a cada 2 minutos
   setTimeout(() => {
-    buscarEmailsNovos();
-    setInterval(buscarEmailsNovos, 2 * 60 * 1000);
+    buscarEmailsNovos().catch(e => console.error("❌ IMAP (checagem periódica):", e.message));
+    setInterval(() => buscarEmailsNovos().catch(e => console.error("❌ IMAP (checagem periódica):", e.message)), 2 * 60 * 1000);
   }, 10000); // aguarda 10s após iniciar
 
   setTimeout(() => {
