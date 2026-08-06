@@ -1153,7 +1153,7 @@ const EMAIL_CONFIG = {
   host: "mail.meneghettimoveis.com.br",
   port: 993,
   user: "lucas@meneghettimoveis.com.br",
-  pass: process.env.EMAIL_PASS || "Esmeralda@4s"
+  pass: process.env.EMAIL_PASS
 };
 
 let _emailsVistos = new Set(); // UIDs já processados
