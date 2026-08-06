@@ -136,6 +136,68 @@ async function saveMeta(m) {
 
 function saveData() {} // mantido para compatibilidade
 
+// ── ORGANIZAÇÃO AUTOMÁTICA DE AGENDA ──
+// Encaixa itens sem horário nos espaços livres do dia (determinístico — não depende da IA "imaginar" horários).
+// Janela comercial: 7h–18h (seg-sáb), almoço 12h-13h bloqueado, itens pessoais sem espaço tentam 18h-22h.
+function organizarSlots(itens, eventosExistentesDoDia) {
+  const paraMin = (hhmm) => {
+    const [h, m] = hhmm.split(":").map(Number);
+    return h * 60 + (m || 0);
+  };
+  const paraHora = (min) => String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
+
+  const blocos = [{ inicio: 12 * 60, fim: 13 * 60 }]; // almoço
+  eventosExistentesDoDia.forEach(e => {
+    if (e.hora) {
+      const ini = paraMin(e.hora);
+      blocos.push({ inicio: ini, fim: ini + 60 });
+    }
+  });
+  const ocupado = (ini, fim) => blocos.some(b => ini < b.fim && b.inicio < fim);
+  const reservar = (ini, fim) => blocos.push({ inicio: ini, fim });
+
+  const agendados = [];
+  const conflitos = [];
+  const semEspaco = [];
+
+  const fixos = itens.filter(it => it.hora);
+  const flexiveis = itens.filter(it => !it.hora);
+
+  for (const it of fixos) {
+    const ini = paraMin(it.hora);
+    const fim = ini + 60;
+    if (ocupado(ini, fim)) { conflitos.push(it); continue; }
+    reservar(ini, fim);
+    agendados.push({ titulo: it.titulo, hora: it.hora, tipo: it.tipo || "Trabalho" });
+  }
+
+  for (const it of flexiveis) {
+    let colocado = false;
+    for (let h = 7; h <= 17 && !colocado; h++) {
+      const ini = h * 60, fim = ini + 60;
+      if (!ocupado(ini, fim)) {
+        reservar(ini, fim);
+        agendados.push({ titulo: it.titulo, hora: paraHora(ini), tipo: it.tipo || "Trabalho" });
+        colocado = true;
+      }
+    }
+    if (!colocado && (it.tipo || "").toLowerCase() === "pessoal") {
+      for (let h = 18; h <= 21 && !colocado; h++) {
+        const ini = h * 60, fim = ini + 60;
+        if (!ocupado(ini, fim)) {
+          reservar(ini, fim);
+          agendados.push({ titulo: it.titulo, hora: paraHora(ini), tipo: it.tipo || "Pessoal" });
+          colocado = true;
+        }
+      }
+    }
+    if (!colocado) semEspaco.push(it);
+  }
+
+  agendados.sort((a, b) => a.hora.localeCompare(b.hora));
+  return { agendados, conflitos, semEspaco };
+}
+
 // ── ESTADO ──
 let state = {
   transacoes: [],
@@ -246,8 +308,12 @@ SUAS CAPACIDADES — você pode executar essas ações respondendo com JSON:
 Para CRIAR EVENTO ÚNICO:
 {"acao":"criar_evento","titulo":"...","data":"YYYY-MM-DD","hora":"HH:MM","tipo":"Trabalho|Pessoal|Saúde|Social|Imóveis|Outro","link":"...opcional","diaTodo":false}
 
-Para CRIAR MÚLTIPLOS EVENTOS (SEMPRE use quando houver 2+ eventos ou período de datas):
+Para CRIAR MÚLTIPLOS EVENTOS (SEMPRE use quando houver 2+ eventos ou período de datas, e TODOS já tiverem horário definido):
 {"acao":"criar_eventos","eventos":[{"titulo":"...","data":"YYYY-MM-DD","hora":"HH:MM","tipo":"...","diaTodo":false}]}
+
+Para ORGANIZAR/DISTRIBUIR VÁRIOS COMPROMISSOS NO DIA (quando o Lucas pedir para "organizar", "distribuir", "encaixar" ou "agendar" uma lista onde NEM TODOS os itens têm horário definido):
+{"acao":"organizar_eventos","data":"YYYY-MM-DD","itens":[{"titulo":"...","hora":"HH:MM (OMITIR se o Lucas não disse horário pra esse item)","tipo":"Trabalho|Pessoal|Saúde|Social|Imóveis|Outro (opcional)"}]}
+⚠️ IMPORTANTE: você NUNCA deve calcular ou inventar horário para os itens sem horário — o sistema encontra os espaços livres automaticamente respeitando a agenda existente. Só preencha "hora" quando o Lucas mencionou explicitamente um horário pra aquele item específico (ex: "reunião às 15h"). Para os demais, omita o campo "hora" completamente.
 
 Para CRIAR TAREFA ÚNICA:
 {"acao":"criar_tarefa","nome":"...","prio":"alta|media|baixa","prazo":"YYYY-MM-DD","cat":"Trabalho|Pessoal|Financeiro|Saúde|Imóveis|Outro"}
@@ -349,7 +415,7 @@ REGRAS CRÍTICAS — LEIA COM ATENÇÃO:
 1. Sempre responda com JSON válido — apenas o JSON, sem texto antes ou depois, sem blocos de código
 2. MÚLTIPLAS TAREFAS: se o usuário listar 2 ou mais tarefas, use OBRIGATORIAMENTE "criar_tarefas" com array. NUNCA crie só a primeira.
 3. PERÍODO DE DATAS: "de 29/06 até 03/07" ou "do dia X ao dia Y" = crie um evento para CADA DIA do período usando "criar_eventos". Ex: viagem de 5 dias = 5 eventos, um por dia, ou crie o evento de início e fim.
-4. MÚLTIPLOS EVENTOS: sempre use "criar_eventos" com array quando houver 2+ eventos
+4. MÚLTIPLOS EVENTOS: sempre use "criar_eventos" com array quando houver 2+ eventos E todos já tiverem horário definido. Se faltar horário em algum item e o Lucas pedir pra organizar/distribuir/encaixar, use "organizar_eventos" em vez disso — e NUNCA invente o horário dos itens sem hora, deixe o sistema calcular
 5. Para datas relativas: "amanhã" = ${new Date(new Date(hojeStr()).getTime()+86400000).toISOString().split("T")[0]}, calcule sempre a partir de hoje ${hojeStr()}
 6. Seja direto, warm e objetivo. Use emojis com moderação
 7. Responda sempre em português do Brasil
@@ -479,6 +545,62 @@ async function executeAction(jsonStr) {
       }
       let msg = `📅 <b>${criados.length} evento(s) agendado(s)!</b>\n\n${criados.join("\n")}`;
       if (erros > 0) msg += `\n\n⚠️ ${erros} evento(s) não puderam ser salvos. Tente novamente.`;
+      msg += `\n\n🔗 <a href="https://secretaria-virtual-kz3e.onrender.com">Ver no painel</a>`;
+      return msg;
+    }
+
+    case "organizar_eventos": {
+      const dataAlvo = action.data;
+      if (!dataAlvo || !Array.isArray(action.itens) || !action.itens.length) {
+        return "Não entendi quais compromissos organizar. Pode listar de novo?";
+      }
+      const [ay, am, ad] = dataAlvo.split("-");
+      const dow = new Date(dataAlvo + "T12:00:00").getDay();
+
+      if (dow === 0) {
+        return `📅 ${ad}/${am}/${ay} é domingo — não tenho um horário comercial padrão pra esse dia. Me diga o horário de cada compromisso que eu agendo certinho.`;
+      }
+
+      const eventosDoDia = state.eventos.filter(e => e.data === dataAlvo && !e.concluido);
+      const eventoDiaTodo = eventosDoDia.find(e => e.diaTodo);
+      if (eventoDiaTodo) {
+        return `📅 ${ad}/${am}/${ay} já tem "<b>${eventoDiaTodo.titulo}</b>" marcado como dia inteiro — não vou encaixar outros compromissos nesse dia. Quer organizar em outro dia, ou seguir mesmo assim?`;
+      }
+
+      const { agendados, conflitos, semEspaco } = organizarSlots(action.itens, eventosDoDia);
+
+      const criados = [];
+      for (let i = 0; i < agendados.length; i++) {
+        const it = agendados[i];
+        const novoEv = {
+          id: Date.now() + i * 10,
+          titulo: it.titulo, data: dataAlvo, hora: it.hora,
+          tipo: it.tipo || "Trabalho", link: "", desc: "", diaTodo: false, concluido: false
+        };
+        try {
+          await saveEvento(novoEv);
+          state.eventos.push(novoEv);
+          criados.push(`• <b>${it.titulo}</b> — ${it.hora}`);
+        } catch(e) {
+          console.error(`❌ Erro ao salvar evento organizado ${it.titulo}:`, e.message);
+        }
+        if (i < agendados.length - 1) await new Promise(r => setTimeout(r, 50));
+      }
+
+      let msg = criados.length
+        ? `📅 <b>Agenda organizada para ${ad}/${am}/${ay}!</b>\n\n${criados.join("\n")}`
+        : `📅 Não consegui encaixar nenhum compromisso em ${ad}/${am}/${ay}.`;
+
+      if (conflitos.length) {
+        msg += `\n\n⚠️ <b>Não encaixei (horário já ocupado):</b>\n` +
+          conflitos.map(c => `• ${c.titulo} (pediu ${c.hora})`).join("\n") +
+          `\nMe diga outro horário pra esses.`;
+      }
+      if (semEspaco.length) {
+        msg += `\n\n⚠️ <b>Sem espaço na agenda desse dia:</b>\n` +
+          semEspaco.map(c => `• ${c.titulo}`).join("\n") +
+          `\nQuer que eu coloque depois das 18h, em outro dia, ou você define o horário?`;
+      }
       msg += `\n\n🔗 <a href="https://secretaria-virtual-kz3e.onrender.com">Ver no painel</a>`;
       return msg;
     }
