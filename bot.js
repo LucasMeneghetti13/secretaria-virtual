@@ -1869,7 +1869,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── GET /calendar.ics — Apple Calendar feed ──
-  if (req.method === "GET" && url === "/calendar.ics") {
+  if ((req.method === "GET" || req.method === "HEAD") && url === "/calendar.ics") {
     const hoje = hojeStr();
     const eventos = state.eventos.filter(e => !e.concluido && e.data >= hoje);
     
@@ -1947,9 +1947,10 @@ const server = http.createServer(async (req, res) => {
       'Content-Type': 'text/calendar; charset=utf-8',
       'Content-Disposition': 'inline; filename="claudete.ics"',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-cache'
+      'Cache-Control': 'no-cache',
+      'Content-Length': Buffer.byteLength(body)
     });
-    return res.end(body);
+    return res.end(req.method === "HEAD" ? undefined : body);
   }
 
   // ── GET /api/notas ──
