@@ -53,7 +53,11 @@ function sbRequest(method, table, body, query) {
 
 async function sbGet(table) {
   const r = await sbRequest("GET", table, null, "?order=created_at.asc");
-  return Array.isArray(r.data) ? r.data : [];
+  if (r.status < 200 || r.status >= 300 || !Array.isArray(r.data)) {
+    console.error(`❌ sbGet(${table}) falhou (status ${r.status}) — mantendo dados anteriores em memória`);
+    return null; // null = falha (mantém estado atual); [] = tabela realmente vazia
+  }
+  return r.data;
 }
 
 async function sbInsert(table, row) {
@@ -76,11 +80,11 @@ async function loadFromSupabase() {
       sbGet("metas"), sbGet("habitos"),
       sbRequest("GET", "configuracoes", null, "?chave=eq.cfg&select=valor")
     ]);
-    state.transacoes = tr.map(t => ({...t, desc: t.descricao, dataPgto: t.data_pgto}));
-    state.eventos    = ev.map(e => ({...e, desc: e.descricao, diaTodo: e.dia_todo, concluido: e.concluido||false}));
-    state.tarefas    = tk;
-    state.metas      = mt;
-    if (hb.length) state.habitos = hb.map(h => h.texto);
+    if (tr) state.transacoes = tr.map(t => ({...t, desc: t.descricao, dataPgto: t.data_pgto}));
+    if (ev) state.eventos    = ev.map(e => ({...e, desc: e.descricao, diaTodo: e.dia_todo, concluido: e.concluido||false}));
+    if (tk) state.tarefas    = tk;
+    if (mt) state.metas      = mt;
+    if (hb && hb.length) state.habitos = hb.map(h => h.texto);
     // Carrega categorias e contas personalizadas
     if (cfg.data?.[0]?.valor) {
       try {
@@ -93,13 +97,15 @@ async function loadFromSupabase() {
     }
     // Carrega lembretes não enviados
     const lm = await sbGet("lembretes");
-    state.lembretes = lm.filter(l => !l.enviado).map(l => ({
-      id: l.id, texto: l.texto,
-      dataHora: new Date(l.data_hora).getTime(),
-      enviado: false
-    }));
+    if (lm) {
+      state.lembretes = lm.filter(l => !l.enviado).map(l => ({
+        id: l.id, texto: l.texto,
+        dataHora: new Date(l.data_hora).getTime(),
+        enviado: false
+      }));
+    }
     const nt = await sbGet("notas");
-    state.notas = nt;
+    if (nt) state.notas = nt;
     console.log("📂 Supabase: " + state.transacoes.length + " transações, " + state.eventos.length + " eventos, " + state.tarefas.length + " tarefas, " + state.lembretes.length + " lembretes, " + state.notas.length + " notas | cats: " + (state.userCats||[]).join(', '));
   } catch(e) { console.error("❌ loadFromSupabase:", e.message); }
 }
@@ -2190,34 +2196,41 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ status: "online", uptime: process.uptime() }));
 });
 
-server.listen(PORT, () => {
-  console.log(`✅ Secretaria Virtual rodando na porta ${PORT}`);
-  console.log(`📱 Bot: @secretaria_virtual_lucas_bot`);
-  console.log(`💬 Chat ID: ${CHAT_ID}`);
-  console.log(`🤖 IA: Claude Sonnet ativo`);
+(async () => {
+  // Carrega os dados reais ANTES de aceitar qualquer requisição — evita que
+  // /calendar.ics (ou qualquer outra rota) responda com estado vazio logo
+  // após um deploy, o que faria o Apple Calendar (ou o painel) achar que
+  // não há nada cadastrado.
+  await loadFromSupabase();
 
-  loadFromSupabase();
-  pollUpdates();
-  setInterval(checkBriefings, 60000);
-  setInterval(loadFromSupabase, 300000); // re-sync every 5min
-  // Verifica e-mails a cada 2 minutos
-  setTimeout(() => {
-    buscarEmailsNovos().catch(e => console.error("❌ IMAP (checagem periódica):", e.message));
-    setInterval(() => buscarEmailsNovos().catch(e => console.error("❌ IMAP (checagem periódica):", e.message)), 2 * 60 * 1000);
-  }, 10000); // aguarda 10s após iniciar
+  server.listen(PORT, () => {
+    console.log(`✅ Secretaria Virtual rodando na porta ${PORT}`);
+    console.log(`📱 Bot: @secretaria_virtual_lucas_bot`);
+    console.log(`💬 Chat ID: ${CHAT_ID}`);
+    console.log(`🤖 IA: Claude Sonnet ativo`);
 
-  setTimeout(() => {
-    sendTelegram(
-      `🤖 <b>Secretaria Virtual — IA ativada!</b>\n\n` +
-      `Olá Lucas! Agora você pode falar comigo em linguagem natural.\n\n` +
-      `Exemplos do que posso fazer:\n` +
-      `• "Amanhã às 9h tenho reunião com João"\n` +
-      `• "Gastei 85 reais no mercado"\n` +
-      `• "Me lembra de ligar pro cliente na sexta"\n` +
-      `• "Como estão meus gastos este mês?"\n` +
-      `• "Agendar dia 01/06 às 14h visita Deltasul e dia 04/06 às 15h visita Quero Quero"\n\n` +
-      `⏰ Briefing às 7h · Resumo às 19h\n` +
-      `🔗 <a href="https://secretaria-virtual-kz3e.onrender.com">Abrir painel</a>`
-    );
-  }, 3000);
-});
+    pollUpdates();
+    setInterval(checkBriefings, 60000);
+    setInterval(loadFromSupabase, 300000); // re-sync every 5min
+    // Verifica e-mails a cada 2 minutos
+    setTimeout(() => {
+      buscarEmailsNovos().catch(e => console.error("❌ IMAP (checagem periódica):", e.message));
+      setInterval(() => buscarEmailsNovos().catch(e => console.error("❌ IMAP (checagem periódica):", e.message)), 2 * 60 * 1000);
+    }, 10000); // aguarda 10s após iniciar
+
+    setTimeout(() => {
+      sendTelegram(
+        `🤖 <b>Secretaria Virtual — IA ativada!</b>\n\n` +
+        `Olá Lucas! Agora você pode falar comigo em linguagem natural.\n\n` +
+        `Exemplos do que posso fazer:\n` +
+        `• "Amanhã às 9h tenho reunião com João"\n` +
+        `• "Gastei 85 reais no mercado"\n` +
+        `• "Me lembra de ligar pro cliente na sexta"\n` +
+        `• "Como estão meus gastos este mês?"\n` +
+        `• "Agendar dia 01/06 às 14h visita Deltasul e dia 04/06 às 15h visita Quero Quero"\n\n` +
+        `⏰ Briefing às 7h · Resumo às 19h\n` +
+        `🔗 <a href="https://secretaria-virtual-kz3e.onrender.com">Abrir painel</a>`
+      );
+    }, 3000);
+  });
+})();
