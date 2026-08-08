@@ -1871,8 +1871,16 @@ const server = http.createServer(async (req, res) => {
   // ── GET /calendar.ics — Apple Calendar feed ──
   if ((req.method === "GET" || req.method === "HEAD") && url === "/calendar.ics") {
     const hoje = hojeStr();
-    const eventos = state.eventos.filter(e => !e.concluido && e.data >= hoje);
-    
+    const d30 = new Date(hoje + "T12:00:00");
+    d30.setDate(d30.getDate() - 30);
+    const limite30d = d30.getFullYear() + "-" + String(d30.getMonth()+1).padStart(2,"0") + "-" + String(d30.getDate()).padStart(2,"0");
+    // Hoje/futuro: só não concluídos. Passado: mostra até 30 dias atrás, concluído ou não.
+    const eventos = state.eventos.filter(e => {
+      if (e.data < limite30d) return false;
+      if (e.data >= hoje) return !e.concluido;
+      return true;
+    });
+
     const pad = n => String(n).padStart(2,'0');
     const toICS = d => {
       if (!d) return '';
