@@ -142,16 +142,17 @@ async function saveMeta(m) {
 
 function saveData() {} // mantido para compatibilidade
 
-// ── ORGANIZAÇÃO AUTOMÁTICA DE AGENDA ──
-// Encaixa itens sem horário nos espaços livres do dia (determinístico — não depende da IA "imaginar" horários).
-// Janela comercial: 7h–18h (seg-sáb), almoço 12h-13h bloqueado, itens pessoais sem espaço tentam 18h-22h.
-function organizarSlots(itens, eventosExistentesDoDia) {
+// ── MOTOR DE CONFLITO/ENCAIXE DE HORÁRIOS ──
+// Usado tanto por "criar_eventos" quanto por "organizar_eventos" — garante que NENHUM
+// evento novo seja salvo em cima de outro que já ocupa aquele horário, independente de
+// qual ação a IA decidiu chamar. Janela comercial: 8h–18h (seg-sáb), almoço 12h-13h
+// bloqueado, itens pessoais sem espaço tentam 18h-22h, e 7h-8h só é usado com confirmação.
+function criarGerenciadorBlocos(eventosExistentesDoDia) {
   const paraMin = (hhmm) => {
     const [h, m] = hhmm.split(":").map(Number);
     return h * 60 + (m || 0);
   };
   const paraHora = (min) => String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
-
   const blocos = [{ inicio: 12 * 60, fim: 13 * 60 }]; // almoço
   eventosExistentesDoDia.forEach(e => {
     if (e.hora) {
@@ -161,47 +162,43 @@ function organizarSlots(itens, eventosExistentesDoDia) {
   });
   const ocupado = (ini, fim) => blocos.some(b => ini < b.fim && b.inicio < fim);
   const reservar = (ini, fim) => blocos.push({ inicio: ini, fim });
+  return { paraMin, paraHora, ocupado, reservar };
+}
 
-  const agendados = [];
-  const conflitos = [];
-  const semEspaco = [];
+// Encaixa UM item. permitirDeslocar=true: se o horário pedido estiver ocupado, procura
+// o próximo livre em vez de recusar (usado por criar_eventos). permitirDeslocar=false:
+// se o horário pedido colidir, não desloca sozinho — reporta o conflito (usado pelos
+// horários "âncora" do organizar_eventos, que o Lucas definiu de propósito).
+function encaixarItem(item, ger, permitirDeslocar) {
+  const tipoPessoal = (item.tipo || "").toLowerCase() === "pessoal";
 
-  const fixos = itens.filter(it => it.hora);
-  const flexiveis = itens.filter(it => !it.hora);
-
-  for (const it of fixos) {
-    const ini = paraMin(it.hora);
-    const fim = ini + 60;
-    if (ocupado(ini, fim)) { conflitos.push(it); continue; }
-    reservar(ini, fim);
-    agendados.push({ titulo: it.titulo, hora: it.hora, tipo: it.tipo || "Trabalho" });
+  if (item.hora) {
+    const ini = ger.paraMin(item.hora);
+    if (!ger.ocupado(ini, ini + 60)) {
+      ger.reservar(ini, ini + 60);
+      return { hora: item.hora, status: "ok" };
+    }
+    if (!permitirDeslocar) return { status: "conflito", horaPedida: item.hora };
   }
 
-  for (const it of flexiveis) {
-    let colocado = false;
-    for (let h = 7; h <= 17 && !colocado; h++) {
-      const ini = h * 60, fim = ini + 60;
-      if (!ocupado(ini, fim)) {
-        reservar(ini, fim);
-        agendados.push({ titulo: it.titulo, hora: paraHora(ini), tipo: it.tipo || "Trabalho" });
-        colocado = true;
-      }
+  for (let h = 8; h <= 17; h++) {
+    const ini = h * 60;
+    if (!ger.ocupado(ini, ini + 60)) {
+      ger.reservar(ini, ini + 60);
+      return { hora: ger.paraHora(ini), status: item.hora ? "movido" : "ok", horaPedida: item.hora || null };
     }
-    if (!colocado && (it.tipo || "").toLowerCase() === "pessoal") {
-      for (let h = 18; h <= 21 && !colocado; h++) {
-        const ini = h * 60, fim = ini + 60;
-        if (!ocupado(ini, fim)) {
-          reservar(ini, fim);
-          agendados.push({ titulo: it.titulo, hora: paraHora(ini), tipo: it.tipo || "Pessoal" });
-          colocado = true;
-        }
-      }
-    }
-    if (!colocado) semEspaco.push(it);
   }
-
-  agendados.sort((a, b) => a.hora.localeCompare(b.hora));
-  return { agendados, conflitos, semEspaco };
+  if (tipoPessoal) {
+    for (let h = 18; h <= 21; h++) {
+      const ini = h * 60;
+      if (!ger.ocupado(ini, ini + 60)) {
+        ger.reservar(ini, ini + 60);
+        return { hora: ger.paraHora(ini), status: item.hora ? "movido" : "ok", horaPedida: item.hora || null };
+      }
+    }
+  }
+  if (!ger.ocupado(7 * 60, 8 * 60)) return { status: "confirmar7h" };
+  return { status: "sememespaco" };
 }
 
 // ── ESTADO ──
@@ -526,30 +523,62 @@ async function executeAction(jsonStr) {
 
     case "criar_eventos": {
       const criados = [];
+      const avisos = [];
       let erros = 0;
-      for (let i = 0; i < action.eventos.length; i++) {
-        const ev = action.eventos[i];
-        // ID único garantido com índice
-        const novoEv = {
-          id: Date.now() + i * 10,
-          titulo: ev.titulo, data: ev.data,
-          hora: ev.hora || "", tipo: ev.tipo || "Trabalho",
-          link: ev.link || "", desc: "", diaTodo: ev.diaTodo || false,
-          concluido: false
-        };
-        try {
-          await saveEvento(novoEv);
-          state.eventos.push(novoEv);
-          const d = ev.data.split("-");
-          criados.push(`• <b>${ev.titulo}</b> — ${d[2]}/${d[1]}/${d[0]}${ev.hora?" às "+ev.hora:""}`);
-        } catch(e) {
-          erros++;
-          console.error(`❌ Erro ao salvar evento ${ev.titulo}:`, e.message);
+      let idx = 0;
+
+      // Agrupa por data — conflito só é checado entre eventos do MESMO dia
+      const porData = {};
+      action.eventos.forEach(ev => { (porData[ev.data] = porData[ev.data] || []).push(ev); });
+
+      for (const data of Object.keys(porData)) {
+        const eventosDoDia = state.eventos.filter(e => e.data === data && !e.concluido);
+        const ger = criarGerenciadorBlocos(eventosDoDia);
+        const [ay, am, ad] = data.split("-");
+
+        for (const ev of porData[data]) {
+          let horaFinal = ev.hora || "";
+
+          if (ev.hora && !ev.diaTodo) {
+            const r = encaixarItem({ titulo: ev.titulo, hora: ev.hora, tipo: ev.tipo }, ger, true);
+            if (r.status === "confirmar7h") {
+              avisos.push(`• <b>${ev.titulo}</b> — só sobrou o horário das 7h às 8h em ${ad}/${am}/${ay}. Posso colocar aí?`);
+              idx++;
+              continue;
+            }
+            if (r.status === "sememespaco") {
+              avisos.push(`• <b>${ev.titulo}</b> — não coube em ${ad}/${am}/${ay}, a agenda tá cheia.`);
+              idx++;
+              continue;
+            }
+            horaFinal = r.hora;
+            if (r.status === "movido") {
+              avisos.push(`• <b>${ev.titulo}</b> — pedido às ${ev.hora}, já tinha algo nesse horário, movido pra ${r.hora}.`);
+            }
+          }
+
+          const novoEv = {
+            id: Date.now() + idx * 10,
+            titulo: ev.titulo, data: ev.data,
+            hora: horaFinal, tipo: ev.tipo || "Trabalho",
+            link: ev.link || "", desc: "", diaTodo: ev.diaTodo || false,
+            concluido: false
+          };
+          idx++;
+          try {
+            await saveEvento(novoEv);
+            state.eventos.push(novoEv);
+            criados.push(`• <b>${ev.titulo}</b> — ${ad}/${am}/${ay}${horaFinal?" às "+horaFinal:""}`);
+          } catch(e) {
+            erros++;
+            console.error(`❌ Erro ao salvar evento ${ev.titulo}:`, e.message);
+          }
+          await new Promise(r => setTimeout(r, 50));
         }
-        // Pequena pausa entre salvamentos para evitar conflito de ID
-        if (i < action.eventos.length - 1) await new Promise(r => setTimeout(r, 50));
       }
+
       let msg = `📅 <b>${criados.length} evento(s) agendado(s)!</b>\n\n${criados.join("\n")}`;
+      if (avisos.length) msg += `\n\n⚠️ <b>Atenção:</b>\n${avisos.join("\n")}`;
       if (erros > 0) msg += `\n\n⚠️ ${erros} evento(s) não puderam ser salvos. Tente novamente.`;
       msg += `\n\n🔗 <a href="https://secretaria-virtual-kz3e.onrender.com">Ver no painel</a>`;
       return msg;
@@ -573,7 +602,30 @@ async function executeAction(jsonStr) {
         return `📅 ${ad}/${am}/${ay} já tem "<b>${eventoDiaTodo.titulo}</b>" marcado como dia inteiro — não vou encaixar outros compromissos nesse dia. Quer organizar em outro dia, ou seguir mesmo assim?`;
       }
 
-      const { agendados, conflitos, semEspaco } = organizarSlots(action.itens, eventosDoDia);
+      const ger = criarGerenciadorBlocos(eventosDoDia);
+      // Âncoras (horário definido pelo Lucas) primeiro — protegem o horário antes dos flexíveis serem encaixados
+      const fixos = action.itens.filter(it => it.hora);
+      const flexiveis = action.itens.filter(it => !it.hora);
+
+      const agendados = [];
+      const conflitos = [];
+      const semEspaco = [];
+      const confirmar7h = [];
+
+      for (const it of fixos) {
+        const r = encaixarItem(it, ger, false); // âncora explícita: não desloca sozinha em conflito
+        if (r.status === "ok") agendados.push({ titulo: it.titulo, hora: r.hora, tipo: it.tipo || "Trabalho" });
+        else if (r.status === "conflito") conflitos.push(it);
+        else if (r.status === "confirmar7h") confirmar7h.push(it);
+        else semEspaco.push(it);
+      }
+      for (const it of flexiveis) {
+        const r = encaixarItem(it, ger, true);
+        if (r.status === "ok" || r.status === "movido") agendados.push({ titulo: it.titulo, hora: r.hora, tipo: it.tipo || "Trabalho" });
+        else if (r.status === "confirmar7h") confirmar7h.push(it);
+        else semEspaco.push(it);
+      }
+      agendados.sort((a, b) => a.hora.localeCompare(b.hora));
 
       const criados = [];
       for (let i = 0; i < agendados.length; i++) {
@@ -601,6 +653,11 @@ async function executeAction(jsonStr) {
         msg += `\n\n⚠️ <b>Não encaixei (horário já ocupado):</b>\n` +
           conflitos.map(c => `• ${c.titulo} (pediu ${c.hora})`).join("\n") +
           `\nMe diga outro horário pra esses.`;
+      }
+      if (confirmar7h.length) {
+        msg += `\n\n🕐 <b>Só sobrou o horário das 7h às 8h para:</b>\n` +
+          confirmar7h.map(c => `• ${c.titulo}`).join("\n") +
+          `\nPosso colocar nesse horário?`;
       }
       if (semEspaco.length) {
         msg += `\n\n⚠️ <b>Sem espaço na agenda desse dia:</b>\n` +
